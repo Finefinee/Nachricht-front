@@ -1,6 +1,7 @@
 # Nachricht Frontend
 
 Spring Boot 백엔드와 연동되는 React TypeScript 메시징 앱 프론트엔드입니다.
+프론트 몰라서 걍 copilot 시킴 ㅋㅋ;
 
 ## 🚀 기능
 
