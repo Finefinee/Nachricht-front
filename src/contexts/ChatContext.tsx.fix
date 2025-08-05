@@ -1,0 +1,304 @@
+// 채팅방 로딩 문제 해결을 위한 심플한 접근 방법
+
+import React, { createContext, useReducer, useEffect, useCallback, useState } from 'react';
+import type { ChatState, MessengerRoom, MessageEntity, SendMessageRequest } from '../types';
+import { roomAPI, messageAPI } from '../services/api';
+import webSocketService from '../services/websocket';
+import { useAuth } from '../hooks/useAuth';
+
+interface ChatAction {
+  type: 
+    | 'SET_LOADING'
+    | 'SET_ERROR'
+    | 'SET_ROOMS'
+    | 'SET_MESSAGES'
+    | 'ADD_MESSAGE'
+    | 'SET_ACTIVE_ROOM'
+    | 'CLEAR_ERROR';
+  payload?: unknown;
+}
+
+const initialState: ChatState = {
+  rooms: [],
+  messages: {},
+  activeRoom: null,
+  isLoading: false,
+  error: null,
+};
+
+const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
+  switch (action.type) {
+    case 'SET_LOADING': {
+      return {
+        ...state,
+        isLoading: action.payload as boolean,
+      };
+    }
+    case 'SET_ERROR': {
+      return {
+        ...state,
+        error: action.payload as string,
+        isLoading: false,
+      };
+    }
+    case 'SET_ROOMS': {
+      return {
+        ...state,
+        rooms: action.payload as MessengerRoom[],
+        isLoading: false,
+      };
+    }
+    case 'SET_MESSAGES': {
+      const { roomId, messages } = action.payload as { roomId: number; messages: MessageEntity[] };
+      return {
+        ...state,
+        messages: {
+          ...state.messages,
+          [roomId]: messages,
+        },
+        isLoading: false,
+      };
+    }
+    case 'ADD_MESSAGE': {
+      const message = action.payload as SendMessageRequest;
+      const roomId = message.roomId;
+      const currentMessages = state.messages[roomId] || [];
+      
+      // 중복 메시지 방지
+      const isDuplicate = currentMessages.some(
+        (msg) => msg.content === message.content && 
+                 msg.sender.username === message.senderUsername &&
+                 Math.abs(new Date(msg.sentAt).getTime() - new Date(message.when).getTime()) < 1000
+      );
+      
+      if (!isDuplicate) {
+        // SendMessageRequest를 MessageEntity 형태로 변환
+        const messageEntity: MessageEntity = {
+          id: Date.now(), // 임시 ID
+          content: message.content,
+          sentAt: message.when,
+          sender: { username: message.senderUsername, role: 'USER' },
+          room: state.rooms.find(r => r.id === roomId) || { id: roomId, participants: [] },
+        };
+        
+        return {
+          ...state,
+          messages: {
+            ...state.messages,
+            [roomId]: [...currentMessages, messageEntity],
+          },
+        };
+      }
+      return state;
+    }
+    case 'SET_ACTIVE_ROOM': {
+      return {
+        ...state,
+        activeRoom: action.payload as MessengerRoom,
+      };
+    }
+    case 'CLEAR_ERROR': {
+      return {
+        ...state,
+        error: null,
+      };
+    }
+    default:
+      return state;
+  }
+};
+
+interface ChatContextType {
+  state: ChatState;
+  loadRooms: () => Promise<void>;
+  loadMessages: (roomId: number) => Promise<void>;
+  sendMessage: (roomId: number, content: string) => void;
+  setActiveRoom: (room: MessengerRoom) => void;
+  createRoom: (participantUsername: string) => Promise<MessengerRoom | null>;
+  clearError: () => void;
+  isInitializing: boolean;
+}
+
+export const ChatContext = createContext<ChatContextType | undefined>(undefined);
+
+export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [state, dispatch] = useReducer(chatReducer, initialState);
+  const { state: authState } = useAuth();
+  const [isInitializing, setIsInitializing] = useState(true);
+
+  useEffect(() => {
+    // WebSocket 메시지 리스너 설정
+    const unsubscribeMessage = webSocketService.onMessage((message: SendMessageRequest) => {
+      dispatch({ type: 'ADD_MESSAGE', payload: message });
+    });
+
+    return () => {
+      unsubscribeMessage();
+    };
+  }, []);
+
+  // 채팅방 로드 함수 - 단순화된 버전
+  const loadRooms = useCallback(async () => {
+    if (!authState.user) {
+      console.warn('🚫 사용자 정보가 없어 채팅방을 로드할 수 없습니다.');
+      return;
+    }
+    
+    console.log(`📂 채팅방 목록 로드 시작 - 사용자: ${authState.user.username}`);
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      const response = await roomAPI.getUserRooms(authState.user.username);
+      console.log('📦 백엔드 응답 원본 데이터:', JSON.stringify(response, null, 2));
+      
+      // 실제 데이터가 있는지 확인
+      if (Array.isArray(response) && response.length > 0) {
+        // 데이터 유효성 검사
+        const rooms = response.map(room => {
+          if (!room.participants || !Array.isArray(room.participants)) {
+            room.participants = [];
+          }
+          return room;
+        });
+        
+        console.log(`✅ 채팅방 ${rooms.length}개 로드 성공`);
+        dispatch({ type: 'SET_ROOMS', payload: rooms });
+        
+        // 첫 번째 채팅방 자동 선택
+        if (rooms.length > 0 && !state.activeRoom) {
+          console.log('🔄 첫 번째 채팅방 선택:', rooms[0].id);
+          dispatch({ type: 'SET_ACTIVE_ROOM', payload: rooms[0] });
+          // 첫 번째 채팅방의 메시지 로드
+          loadMessages(rooms[0].id);
+        }
+      } else {
+        console.warn('⚠️ 채팅방 데이터가 없거나 형식이 올바르지 않습니다');
+        dispatch({ type: 'SET_ROOMS', payload: [] });
+      }
+    } catch (error) {
+      console.error('❌ 채팅방 목록 로드 실패:', error);
+      dispatch({ type: 'SET_ERROR', payload: '채팅방 목록을 불러오는데 실패했습니다.' });
+    }
+  }, [authState.user, state.activeRoom]);
+
+  const loadMessages = useCallback(async (roomId: number) => {
+    if (!roomId) return;
+    
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      console.log(`📩 채팅방 #${roomId} 메시지 로드 시작`);
+      const messages = await messageAPI.getMessages(roomId);
+      console.log(`✅ 채팅방 #${roomId} 메시지 ${messages.length}개 로드 성공`);
+      
+      dispatch({ type: 'SET_MESSAGES', payload: { roomId, messages } });
+    } catch (error) {
+      console.error(`❌ 채팅방 #${roomId} 메시지 로드 실패:`, error);
+      dispatch({ type: 'SET_ERROR', payload: '메시지를 불러오는데 실패했습니다.' });
+    }
+  }, []);
+
+  const sendMessage = useCallback((roomId: number, content: string) => {
+    if (!authState.user || !content.trim()) return;
+
+    const message: SendMessageRequest = {
+      senderUsername: authState.user.username,
+      roomId,
+      content: content.trim(),
+      when: new Date().toLocaleTimeString(),
+    };
+
+    // WebSocket으로 메시지 전송
+    webSocketService.sendMessage(message);
+    
+    // 즉시 UI에 반영 (낙관적 업데이트)
+    dispatch({ type: 'ADD_MESSAGE', payload: message });
+  }, [authState.user]);
+
+  const setActiveRoom = useCallback((room: MessengerRoom) => {
+    dispatch({ type: 'SET_ACTIVE_ROOM', payload: room });
+    loadMessages(room.id);
+  }, [loadMessages]);
+
+  const createRoom = useCallback(async (participantUsername: string): Promise<MessengerRoom | null> => {
+    if (!authState.user) return null;
+
+    try {
+      const room = await roomAPI.createRoom([authState.user.username, participantUsername]);
+      
+      // 새 채팅방을 목록에 추가
+      dispatch({ type: 'SET_ROOMS', payload: [...state.rooms, room] });
+      return room;
+    } catch (error) {
+      console.error('❌ 채팅방 생성 실패:', error);
+      dispatch({ type: 'SET_ERROR', payload: '채팅방 생성에 실패했습니다.' });
+      return null;
+    }
+  }, [authState.user, state.rooms]);
+
+  const clearError = useCallback(() => {
+    dispatch({ type: 'CLEAR_ERROR' });
+  }, []);
+
+  // 앱 초기화 - 간단하게 채팅방 로드에 집중
+  useEffect(() => {
+    const initializeChat = async () => {
+      if (!authState.isAuthenticated || !authState.user) {
+        setIsInitializing(false);
+        return;
+      }
+      
+      console.log('🚀 채팅 컨텍스트 초기화 시작...');
+      setIsInitializing(true);
+      
+      try {
+        // 웹소켓 연결은 별도 시도 (실패해도 계속 진행)
+        webSocketService.connect(authState.user.username)
+          .then(() => console.log('✅ 웹소켓 연결 성공'))
+          .catch(() => console.warn('⚠️ 웹소켓 연결 실패'));
+        
+        // 채팅방 로드 - 최대 3회 시도
+        let success = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            console.log(`📂 채팅방 로드 시도 ${attempt}/3...`);
+            await loadRooms();
+            success = true;
+            break;
+          } catch (error) {
+            console.error(`❌ 로드 시도 ${attempt} 실패:`, error);
+            if (attempt < 3) {
+              await new Promise(r => setTimeout(r, attempt * 1000));
+            }
+          }
+        }
+        
+        if (success) {
+          console.log('✅ 채팅 초기화 완료');
+        } else {
+          console.error('❌ 모든 로드 시도 실패');
+        }
+      } finally {
+        // 성공 여부와 관계없이 초기화 상태 해제
+        setIsInitializing(false);
+      }
+    };
+    
+    initializeChat();
+  }, [authState.isAuthenticated, authState.user, loadRooms]);
+
+  return (
+    <ChatContext.Provider value={{ 
+      state, 
+      loadRooms, 
+      loadMessages, 
+      sendMessage, 
+      setActiveRoom, 
+      createRoom,
+      clearError,
+      isInitializing
+    }}>
+      {children}
+    </ChatContext.Provider>
+  );
+};

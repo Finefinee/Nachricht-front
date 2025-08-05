@@ -1,0 +1,197 @@
+import React, { useState, useEffect } from 'react';
+import { LogOut, MessageCircle, Plus, User, RefreshCw } from 'lucide-react';
+import { useAuth } from '../hooks/useAuth';
+import { useChat } from '../hooks/useChat';
+import type { User as UserType } from '../types';
+
+const ChatSidebar: React.FC = () => {
+  const { state: authState, logout } = useAuth();
+  const { state: chatState, setActiveRoom, createRoom, loadRooms } = useChat();
+  const [showNewChatInput, setShowNewChatInput] = useState(false);
+  const [newChatUsername, setNewChatUsername] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // 채팅방 새로고침 핸들러
+  const handleRefreshRooms = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await loadRooms();
+    } catch (error) {
+      console.error('채팅방 새로고침 실패:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // 새 채팅 생성 핸들러
+  const handleNewChat = async () => {
+    if (newChatUsername.trim()) {
+      const room = await createRoom(newChatUsername.trim());
+      if (room) {
+        setActiveRoom(room);
+        setShowNewChatInput(false);
+        setNewChatUsername('');
+      }
+    }
+  };
+
+  // 채팅방의 다른 참여자를 안전하게 가져옴
+  const getOtherParticipant = (participants: UserType[]) => {
+    // 참여자 배열이 유효한지 확인
+    if (!participants || !Array.isArray(participants) || participants.length === 0) {
+      console.warn('❌ 유효하지 않은 participants 데이터:', participants);
+      return { username: '알 수 없는 사용자' };
+    }
+    
+    // 디버깅 정보 출력
+    console.log('🔍 getOtherParticipant 확인:', { 
+      roomParticipants: participants.map(p => p?.username || 'unknown'),
+      currentUser: authState.user?.username || 'unknown'
+    });
+    
+    // 다른 참여자를 찾거나 기본값 반환
+    const otherUser = participants.find(p => p && p.username && p.username !== authState.user?.username);
+    return otherUser || participants[0] || { username: '알 수 없는 사용자' };
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-white">
+      {/* 헤더 */}
+      <div className="p-4 border-b border-gray-200">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <User className="h-6 w-6 text-primary-600" />
+            <span className="font-semibold text-gray-900">
+              {authState.user?.username || '게스트'}
+            </span>
+          </div>
+          <div className="flex space-x-2">
+            <button
+              onClick={handleRefreshRooms}
+              disabled={isRefreshing || chatState.isLoading}
+              className={`p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 
+                ${(isRefreshing || chatState.isLoading) ? 'opacity-50 cursor-not-allowed' : ''}`}
+              title="채팅방 새로고침"
+            >
+              <RefreshCw className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={logout}
+              className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              title="로그아웃"
+            >
+              <LogOut className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 새 채팅 버튼 */}
+      <div className="p-4 border-b border-gray-200">
+        {!showNewChatInput ? (
+          <button
+            onClick={() => setShowNewChatInput(true)}
+            className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+          >
+            <Plus className="h-4 w-4" />
+            <span>새 채팅</span>
+          </button>
+        ) : (
+          <div className="space-y-2">
+            <input
+              type="text"
+              placeholder="사용자명 입력"
+              value={newChatUsername}
+              onChange={(e) => setNewChatUsername(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleNewChat()}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+              autoFocus
+            />
+            <div className="flex space-x-2">
+              <button
+                onClick={handleNewChat}
+                className="flex-1 px-3 py-1 bg-primary-600 text-white rounded text-sm hover:bg-primary-700"
+              >
+                생성
+              </button>
+              <button
+                onClick={() => {
+                  setShowNewChatInput(false);
+                  setNewChatUsername('');
+                }}
+                className="flex-1 px-3 py-1 bg-gray-300 text-gray-700 rounded text-sm hover:bg-gray-400"
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 채팅방 목록 */}
+      <div className="flex-1 overflow-y-auto">
+        {chatState.isLoading ? (
+          <div className="p-4 text-center text-gray-500">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto mb-2"></div>
+            채팅방을 불러오는 중...
+          </div>
+        ) : !chatState.rooms || chatState.rooms.length === 0 ? (
+          <div className="p-4 text-center text-gray-500">
+            <MessageCircle className="h-8 w-8 mx-auto mb-2 text-gray-300" />
+            <p>채팅방이 없습니다</p>
+            <p className="text-sm">새 채팅을 시작해보세요!</p>
+          </div>
+        ) : (
+          chatState.rooms
+            .filter(room => room && typeof room.id === 'number')
+            .map((room) => {
+              console.log('📍 채팅방 렌더링 중:', room.id, '참여자:', room.participants);
+              const otherParticipant = getOtherParticipant(room.participants);
+              const isActive = chatState.activeRoom?.id === room.id;
+              
+              return (
+                <div
+                  key={room.id}
+                  onClick={() => setActiveRoom(room)}
+                  className={`p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 ${
+                    isActive ? 'bg-primary-50 border-primary-200' : ''
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <div className="flex-shrink-0">
+                      <div className="h-10 w-10 bg-primary-600 rounded-full flex items-center justify-center">
+                        <span className="text-white font-medium">
+                          {otherParticipant?.username?.[0]?.toUpperCase() || 
+                          (room.id ? room.id.toString()[0] : '?')}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {otherParticipant?.username || `채팅방 #${room.id}`}
+                      </p>
+                      {chatState.messages[room.id]?.length > 0 && (
+                        <p className="text-sm text-gray-500 truncate">
+                          {chatState.messages[room.id][chatState.messages[room.id].length - 1].content}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+        )}
+      </div>
+
+      {/* 에러 표시 */}
+      {chatState.error && (
+        <div className="p-4 bg-red-50 border-t border-red-200">
+          <p className="text-sm text-red-800">{chatState.error}</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ChatSidebar;

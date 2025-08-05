@@ -1,0 +1,1118 @@
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './contexts/AuthContext';
+import { ChatProvider } from './contexts/ChatContext';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+import ChatPage from './pages/ChatPage';
+import { useAuth } from './hooks/useAuth';
+import './App.css';
+
+// 보호된 라우트 컴포넌트 - 인증되지 않은 사용자 리디렉션
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { state } = useAuth();
+  
+  if (!state.isAuthenticated) {
+    console.log('🔒 인증되지 않은 사용자 - 로그인 페이지로 리디렉션');
+    return <Navigate to="/login" />;
+  }
+
+  return <>{children}</>;
+};
+
+// 이미 인증된 사용자는 채팅 페이지로 리디렉션
+const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { state } = useAuth();
+  
+  if (state.isAuthenticated) {
+    console.log('🔓 이미 인증된 사용자 - 채팅 페이지로 리디렉션');
+    return <Navigate to="/chat" />;
+  }
+
+  return <>{children}</>;
+};
+  
+  // 메시지 수신 핸들러 - currentRoomId가 변경될 때마다 새로 생성
+  const handleMessageReceived = useCallback((message: SendMessageRequest) => {
+    console.log('📨 실시간 메시지 수신:', message, '현재 방:', currentRoomId);
+    
+    // SendMessageRequest를 MessageEntity로 변환
+    const messageEntity: MessageEntity = {
+      id: Date.now(),
+      sender: {
+        username: message.senderUsername,
+        role: 'USER'
+      },
+      room: {
+        id: message.roomId,
+        participants: []
+      },
+      content: message.content,
+      sentAt: message.when
+    };
+    
+    // 현재 보고 있는 채팅방이라면 메시지를 추가
+    if (message.roomId === currentRoomId) {
+      setMessages(prev => [...prev, messageEntity]);
+    } else {
+      console.log(`📩 다른 방(${message.roomId})에 새 메시지가 도착했습니다.`);
+      // TODO: 나중에 알림 시스템 추가 가능
+    }
+  }, [currentRoomId]);
+  
+  useEffect(() => {
+    const initializeApp = async () => {
+      try {
+        // 초기화 시작 표시
+        setIsInitializing(true);
+        setError('');
+        
+        // 기존 토큰 확인
+        const token = localStorage.getItem('accessToken');
+        const savedUser = localStorage.getItem('currentUser');
+        
+        console.log('🔄 앱 초기화 시작 - 토큰:', token ? '존재' : '없음', '사용자:', savedUser);
+        
+        if (!token || !savedUser) {
+          console.log('🔓 토큰 없음 - 로그인 화면 표시');
+          setIsInitializing(false);
+          return;
+        }
+        
+        // 사용자 상태 설정 (즉시 실행)
+        setUser(savedUser);
+        setCurrentPage('chat');
+        
+        // 순차적으로 모든 데이터 로드 (중간에 실패해도 진행)
+        try {
+          console.log('📂 채팅방 목록 로드 시작...');
+          
+          // 채팅방 로드 (최대 3회 재시도)
+          let userRooms: MessengerRoom[] = [];
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          while (retryCount < maxRetries) {
+            try {
+              userRooms = await roomAPI.getUserRooms(savedUser);
+              console.log('📂 채팅방 목록 로드 성공:', userRooms.length, '개 채팅방');
+              break; // 성공하면 루프 종료
+            } catch (roomError) {
+              retryCount++;
+              console.error(`채팅방 로드 실패 (시도 ${retryCount}/${maxRetries}):`, roomError);
+              if (retryCount >= maxRetries) throw roomError;
+              await new Promise(r => setTimeout(r, 1000)); // 1초 대기 후 재시도
+            }
+          }
+          
+          // 채팅방 목록 상태 업데이트
+          setRooms(userRooms);
+          
+          // 첫 번째 채팅방 메시지 로드 (채팅방이 있을 경우)
+          if (userRooms.length > 0) {
+            const firstRoomId = userRooms[0].id;
+            setCurrentRoomId(firstRoomId);
+            console.log('📨 첫 번째 채팅방 메시지 로드 시작:', firstRoomId);
+            
+            try {
+              const roomMessages = await messageAPI.getMessages(firstRoomId);
+              console.log('📨 메시지 로드 성공:', roomMessages.length, '개 메시지');
+              setMessages(roomMessages);
+            } catch (msgError) {
+              console.error('메시지 로드 실패:', msgError);
+              setMessages([]); // 빈 배열로 초기화
+            }
+          } else {
+            console.log('📂 채팅방이 없습니다.');
+            setMessages([]);
+          }
+          
+          // WebSocket 연결 (명시적으로 기다림)
+          console.log('🔌 WebSocket 연결 시작...');
+          try {
+            await webSocketService.connect(savedUser);
+            console.log('✅ WebSocket 연결 성공');
+            
+            // 분리된 메시지 수신 핸들러 설정
+            webSocketService.onMessage(handleMessageReceived);
+          } catch (wsError) {
+            console.error('WebSocket 연결 실패:', wsError);
+            // WebSocket 실패는 치명적 오류가 아니므로 계속 진행
+            setError('실시간 메시징 연결에 실패했습니다. 메시지 전송이 제한될 수 있습니다.');
+          }
+        } catch (error) {
+          console.error('초기화 중 오류 발생:', error);
+          setError('데이터를 불러오는데 실패했습니다. 새로고침을 시도해보세요.');
+        } finally {
+          // 모든 작업 완료 후 초기화 상태 해제
+          setIsInitializing(false);
+          console.log('✅ 앱 초기화 완료');
+        }
+      } catch (criticalError) {
+        console.error('💥 치명적 오류:', criticalError);
+        setError('앱 초기화에 실패했습니다. 페이지를 새로고침해주세요.');
+        setIsInitializing(false);
+      }
+    };
+
+    initializeApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 사용자 채팅방 목록 로드
+  const loadUserRooms = async () => {
+    try {
+      if (user) {
+        console.log('🔄 채팅방 목록 재로드 시작...');
+        const userRooms = await roomAPI.getUserRooms(user);
+        console.log('🔄 채팅방 목록 재로드 성공:', userRooms);
+        setRooms(userRooms);
+        
+        if (userRooms.length > 0) {
+          // 현재 선택된 방이 있으면 유지, 없으면 첫 번째 방 선택
+          const roomToSelect = currentRoomId && userRooms.find(r => r.id === currentRoomId)
+            ? currentRoomId 
+            : userRooms[0].id;
+            
+          setCurrentRoomId(roomToSelect);
+          // 메시지 로딩을 순차적으로 처리
+          await loadMessages(roomToSelect);
+        } else {
+          setCurrentRoomId(null);
+          setMessages([]);
+        }
+      }
+    } catch (error) {
+      console.error('채팅방 로드 실패:', error);
+      setError('채팅방을 불러오는데 실패했습니다.');
+    }
+  };
+
+  // 메시지 로드
+  const loadMessages = async (roomId: number, retryCount = 0) => {
+    try {
+      console.log('📨 메시지 로드 시작 - 채팅방 ID:', roomId);
+      
+      // 로딩 상태 표시
+      setIsLoading(true);
+      
+      const roomMessages = await messageAPI.getMessages(roomId);
+      console.log('📨 메시지 로드 성공:', roomMessages.length, '개 메시지');
+      
+      // 정상 메시지 배열로 설정 및 에러 메시지 초기화
+      setMessages(roomMessages);
+      
+      if (roomMessages.length === 0) {
+        console.log('ℹ️ 채팅방에 메시지가 없습니다.');
+      }
+      
+      // 에러가 있었다면 초기화
+      if (error) setError('');
+      
+    } catch (err) {
+      console.error('메시지 로드 실패:', err);
+      
+      // 최대 2번까지 재시도
+      if (retryCount < 2) {
+        console.log(`🔄 메시지 로드 재시도 ${retryCount + 1}/2...`);
+        setTimeout(() => loadMessages(roomId, retryCount + 1), 1000);
+        return;
+      }
+      
+      // 실패 시 빈 배열로 초기화하고 에러 메시지 설정
+      setMessages([]);
+      setError('메시지를 불러오는데 실패했습니다. 새로고침을 시도해보세요.');
+      
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 새 채팅방 생성
+  const handleCreateRoom = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRoomParticipant.trim() || !user) return;
+
+    const participants = [user, newRoomParticipant.trim()];
+    console.log('채팅방 생성 요청:', { participants });
+
+    try {
+      const response = await roomAPI.createRoom(participants);
+      
+      console.log('채팅방 생성 성공:', response);
+      
+      setNewRoomParticipant('');
+      setShowCreateRoom(false);
+      setError(''); // 성공 시 기존 에러 메시지 제거
+      
+      // 채팅방 목록 새로고침
+      await loadUserRooms();
+    } catch (error) {
+      console.error('채팅방 생성 실패:', error);
+      
+      // 상세한 에러 메시지 처리
+      if (error && typeof error === 'object' && 'response' in error) {
+        const axiosError = error as { response: { status: number; data?: { message?: string }; statusText: string } };
+        const status = axiosError.response.status;
+        const message = axiosError.response.data?.message || axiosError.response.statusText;
+        
+        if (status === 403) {
+          setError('권한이 없습니다. 다시 로그인해주세요.');
+        } else if (status === 404) {
+          setError('존재하지 않는 사용자입니다. 사용자명을 확인해주세요.');
+        } else if (status === 400) {
+          setError('잘못된 요청입니다. 입력값을 확인해주세요.');
+        } else {
+          setError(`채팅방 생성 실패: ${message} (${status})`);
+        }
+      } else if (error instanceof Error) {
+        setError(`채팅방 생성 실패: ${error.message}`);
+      } else {
+        setError('채팅방 생성에 실패했습니다. 네트워크 연결을 확인해주세요.');
+      }
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    
+    if (!username || !password) {
+      setError('사용자명과 비밀번호를 입력해주세요.');
+      return;
+    }
+
+    try {
+      const response = await authAPI.login({ username, password });
+      
+      // 토큰 저장
+      localStorage.setItem('accessToken', response.accessToken);
+      localStorage.setItem('refreshToken', response.refreshToken);
+      localStorage.setItem('currentUser', username);
+      
+      setUser(username);
+      setCurrentPage('chat');
+      
+      // 사용자 채팅방 로드 (먼저 실행)
+      await loadUserRooms();
+      
+      // WebSocket 연결 (백그라운드에서 비동기 실행)
+      webSocketService.connect(username)
+        .then(() => {
+          console.log('✅ WebSocket 연결 성공');
+          
+          // 실시간 메시지 수신 핸들러 설정
+          webSocketService.onMessage((message) => {
+            console.log('📨 실시간 메시지 수신:', message, '현재 방:', currentRoomId);
+            
+            // SendMessageRequest를 MessageEntity로 변환
+            const messageEntity: MessageEntity = {
+              id: Date.now(),
+              sender: {
+                username: message.senderUsername,
+                role: 'USER'
+              },
+              room: {
+                id: message.roomId,
+                participants: []
+              },
+              content: message.content,
+              sentAt: message.when
+            };
+            
+            // 현재 보고 있는 채팅방이라면 메시지를 추가
+            if (currentRoomId === message.roomId) {
+              setMessages(prev => [...prev, messageEntity]);
+            } else {
+              // 다른 방의 메시지인 경우 알림만 표시
+              console.log(`📩 다른 방(${message.roomId})에 새 메시지가 도착했습니다.`);
+              // TODO: 나중에 알림 시스템 추가 가능
+            }
+          });
+        })
+        .catch((wsError) => {
+          console.error('WebSocket 연결 실패:', wsError);
+          setError('실시간 메시징 연결에 실패했습니다. 메시지 전송이 제한될 수 있습니다.');
+        });
+    } catch (error) {
+      console.error('로그인 실패:', error);
+      setError('로그인에 실패했습니다. 사용자명과 비밀번호를 확인해주세요.');
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    
+    if (!username || !password || !confirmPassword) {
+      setError('모든 필드를 입력해주세요.');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('비밀번호가 일치하지 않습니다.');
+      return;
+    }
+
+    if (password.length < 4) {
+      setError('비밀번호는 최소 4자 이상이어야 합니다.');
+      return;
+    }
+
+    try {
+      await authAPI.register({ username, password });
+      
+      // 회원가입 후 자동 로그인
+      const response = await authAPI.login({ username, password });
+      
+      // 토큰 저장
+      localStorage.setItem('accessToken', response.accessToken);
+      localStorage.setItem('refreshToken', response.refreshToken);
+      localStorage.setItem('currentUser', username);
+      
+      setUser(username);
+      setCurrentPage('chat');
+      
+      // 사용자 채팅방 로드
+      await loadUserRooms();
+    } catch (error) {
+      console.error('회원가입 실패:', error);
+      setError('회원가입에 실패했습니다. 다른 사용자명을 시도해보세요.');
+    }
+  };
+
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMessage.trim() || !currentRoomId || !user) return;
+
+    const messageContent = newMessage.trim();
+    setNewMessage(''); // 입력창 즉시 비우기
+
+    try {
+      // WebSocket 연결 상태 확인 및 재연결 시도
+      if (!webSocketService.isConnected()) {
+        console.warn('WebSocket이 연결되지 않음. 재연결 시도...');
+        try {
+          await webSocketService.connect(user);
+          console.log('✅ WebSocket 재연결 성공');
+        } catch (reconnectError) {
+          console.error('WebSocket 재연결 실패:', reconnectError);
+          throw new Error('실시간 메시징 연결에 실패했습니다. 잠시 후 다시 시도해주세요.');
+        }
+      }
+
+      const now = new Date().toISOString();
+      
+      // 내가 보낸 메시지를 즉시 화면에 표시 (낙관적 UI 업데이트)
+      const tempId = Date.now();
+      const myMessage: MessageEntity = {
+        id: tempId,
+        sender: {
+          username: user,
+          role: 'USER'
+        },
+        room: {
+          id: currentRoomId,
+          participants: []
+        },
+        content: messageContent,
+        sentAt: now
+      };
+      
+      setMessages(prev => [...prev, myMessage]);
+      
+      // 메시지 객체 생성
+      const messageRequest = {
+        senderUsername: user,
+        roomId: currentRoomId,
+        content: messageContent,
+        when: now
+      };
+      
+      // 1. WebSocket을 통한 실시간 메시지 전송 (비동기로 처리)
+      const webSocketPromise = webSocketService.sendMessage(messageRequest);
+      
+      // 2. REST API를 통해 DB에 메시지 저장 (병렬로 처리)
+      const savePromise = messageAPI.saveMessage(messageRequest)
+        .then(savedMessage => {
+          console.log('💾 DB에 메시지 저장 성공:', savedMessage);
+          // DB에서 반환된 ID로 임시 메시지 ID 업데이트
+          setMessages(prev => 
+            prev.map(msg => 
+              msg.id === tempId ? { ...msg, id: savedMessage.id } : msg
+            )
+          );
+          return savedMessage;
+        });
+      
+      // 두 작업 모두 완료될 때까지 기다림
+      await Promise.all([webSocketPromise, savePromise]);
+      console.log('✅ 메시지 전송 및 저장 완료');
+      
+    } catch (error) {
+      console.error('메시지 전송 실패:', error);
+      setError('메시지 전송에 실패했습니다: ' + (error instanceof Error ? error.message : 'WebSocket 연결을 확인해주세요.'));
+      // 메시지 전송이 실패하면 입력창에 메시지 내용 복원 (UX 개선)
+      setNewMessage(messageContent);
+    }
+  };
+
+  const logout = () => {
+    // WebSocket 연결 해제
+    webSocketService.disconnect();
+    
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('currentUser');
+    
+    setUser(null);
+    setCurrentPage('login');
+    setUsername('');
+    setPassword('');
+    setConfirmPassword('');
+    setError('');
+    setMessages([]);
+    setRooms([]);
+    setCurrentRoomId(null);
+    setShowCreateRoom(false);
+    setNewRoomParticipant('');
+  };
+
+  // 로그인 페이지
+  if (currentPage === 'login') {
+    return (
+      <div style={{ 
+        minHeight: '100vh', 
+        backgroundColor: '#f0f0f0', 
+        padding: '20px',
+        fontFamily: 'Arial, sans-serif',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }}>
+        <div style={{ 
+          backgroundColor: 'white', 
+          padding: '40px', 
+          maxWidth: '400px',
+          width: '100%',
+          borderRadius: '12px',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.1)'
+        }}>
+          <h1 style={{ color: '#333', fontSize: '1.8rem', textAlign: 'center', marginBottom: '30px' }}>
+            💬 Nachricht
+          </h1>
+          
+          {error && (
+            <div style={{
+              backgroundColor: '#fee',
+              color: '#c33',
+              padding: '10px',
+              borderRadius: '4px',
+              marginBottom: '20px',
+              fontSize: '14px'
+            }}>
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleLogin}>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '5px', color: '#555', fontSize: '14px' }}>
+                사용자명
+              </label>
+              <input 
+                type="text" 
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="사용자명을 입력하세요" 
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '16px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+            <div style={{ marginBottom: '25px' }}>
+              <label style={{ display: 'block', marginBottom: '5px', color: '#555', fontSize: '14px' }}>
+                비밀번호
+              </label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="비밀번호를 입력하세요" 
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '16px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+            <button 
+              type="submit"
+              style={{
+                width: '100%',
+                padding: '14px',
+                backgroundColor: '#007bff',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '16px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              로그인
+            </button>
+          </form>
+          <p style={{ textAlign: 'center', marginTop: '25px', color: '#666' }}>
+            계정이 없으신가요? 
+            <button 
+              onClick={() => setCurrentPage('register')}
+              style={{ 
+                color: '#007bff', 
+                background: 'none', 
+                border: 'none', 
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                textDecoration: 'underline'
+              }}
+            >
+              회원가입
+            </button>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // 회원가입 페이지
+  if (currentPage === 'register') {
+    return (
+      <div style={{ 
+        minHeight: '100vh', 
+        backgroundColor: '#f0f0f0', 
+        padding: '20px',
+        fontFamily: 'Arial, sans-serif',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }}>
+        <div style={{ 
+          backgroundColor: 'white', 
+          padding: '40px', 
+          maxWidth: '400px',
+          width: '100%',
+          borderRadius: '12px',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.1)'
+        }}>
+          <h1 style={{ color: '#333', fontSize: '1.8rem', textAlign: 'center', marginBottom: '30px' }}>
+            📝 회원가입
+          </h1>
+          
+          {error && (
+            <div style={{
+              backgroundColor: '#fee',
+              color: '#c33',
+              padding: '10px',
+              borderRadius: '4px',
+              marginBottom: '20px',
+              fontSize: '14px'
+            }}>
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleRegister}>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '5px', color: '#555', fontSize: '14px' }}>
+                사용자명
+              </label>
+              <input 
+                type="text" 
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="사용자명을 입력하세요" 
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '16px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '5px', color: '#555', fontSize: '14px' }}>
+                비밀번호
+              </label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="비밀번호를 입력하세요" 
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '16px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+            <div style={{ marginBottom: '25px' }}>
+              <label style={{ display: 'block', marginBottom: '5px', color: '#555', fontSize: '14px' }}>
+                비밀번호 확인
+              </label>
+              <input 
+                type="password" 
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="비밀번호를 다시 입력하세요" 
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '16px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+            </div>
+            <button 
+              type="submit"
+              style={{
+                width: '100%',
+                padding: '14px',
+                backgroundColor: '#28a745',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '16px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              회원가입
+            </button>
+          </form>
+          <p style={{ textAlign: 'center', marginTop: '25px', color: '#666' }}>
+            이미 계정이 있으신가요? 
+            <button 
+              onClick={() => setCurrentPage('login')}
+              style={{ 
+                color: '#007bff', 
+                background: 'none', 
+                border: 'none', 
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                textDecoration: 'underline'
+              }}
+            >
+              로그인
+            </button>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // 채팅 페이지
+  return (
+    <div style={{ 
+      minHeight: '100vh', 
+      backgroundColor: '#f8f9fa',
+      fontFamily: 'Arial, sans-serif',
+      display: 'flex',
+      flexDirection: 'column',
+      position: 'relative'
+    }}>
+      {isInitializing && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(255,255,255,0.95)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+          zIndex: 1000
+        }}>
+          <div style={{ 
+            width: '80px', 
+            height: '80px', 
+            border: '5px solid #f3f3f3',
+            borderTop: '5px solid #3498db',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            marginBottom: '20px'
+          }}></div>
+          <style>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+            @keyframes fadeIn {
+              from { opacity: 0; }
+              to { opacity: 1; }
+            }
+          `}</style>
+          <h2 style={{ color: '#333', margin: '0 0 10px 0' }}>Nachricht 로딩 중...</h2>
+          <p style={{ 
+            color: '#666', 
+            maxWidth: '80%', 
+            textAlign: 'center',
+            animation: 'fadeIn 0.5s ease-in-out',
+            margin: '0 0 5px 0' 
+          }}>
+            채팅방 및 메시지 데이터를 불러오는 중입니다
+          </p>
+          <p style={{ 
+            color: '#999', 
+            fontSize: '14px', 
+            maxWidth: '70%', 
+            textAlign: 'center',
+            animation: 'fadeIn 1s ease-in-out',
+            margin: '0'
+          }}>
+            잠시만 기다려주세요...
+          </p>
+        </div>
+      )}
+      {/* 헤더 */}
+      <div style={{
+        backgroundColor: '#007bff',
+        color: 'white',
+        padding: '15px 20px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.1)'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>💬 Nachricht</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+          <span>안녕하세요, {user}님!</span>
+          <button 
+            onClick={logout}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            로그아웃
+          </button>
+        </div>
+      </div>
+
+      {/* 메인 채팅 영역 */}
+      <div style={{ 
+        flex: 1, 
+        display: 'flex',
+        maxHeight: 'calc(100vh - 70px)'
+      }}>
+        {/* 채팅방 목록 */}
+        <div style={{
+          width: '300px',
+          backgroundColor: 'white',
+          borderRight: '1px solid #dee2e6',
+          display: 'flex',
+          flexDirection: 'column'
+        }}>
+          <div style={{
+            padding: '20px',
+            borderBottom: '1px solid #dee2e6',
+            backgroundColor: '#f8f9fa'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, color: '#333' }}>채팅방</h3>
+              <button
+                onClick={() => setShowCreateRoom(!showCreateRoom)}
+                style={{
+                  padding: '6px 12px',
+                  backgroundColor: '#007bff',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                {showCreateRoom ? '취소' : '+ 새 채팅'}
+              </button>
+            </div>
+          </div>
+          <div style={{ flex: 1, padding: '10px' }}>
+            {/* 새 채팅방 생성 폼 */}
+            {showCreateRoom && (
+              <div style={{
+                padding: '15px',
+                backgroundColor: '#e8f4f8',
+                borderRadius: '8px',
+                marginBottom: '15px',
+                border: '2px solid #17a2b8'
+              }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#0c5460', fontSize: '16px' }}>새 채팅방 만들기</h4>
+                <form onSubmit={handleCreateRoom}>
+                  <input
+                    type="text"
+                    value={newRoomParticipant}
+                    onChange={(e) => setNewRoomParticipant(e.target.value)}
+                    placeholder="대화할 사용자명을 입력하세요"
+                    style={{
+                      width: '100%',
+                      padding: '8px',
+                      border: '1px solid #17a2b8',
+                      borderRadius: '4px',
+                      fontSize: '14px',
+                      marginBottom: '10px',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    style={{
+                      width: '100%',
+                      padding: '8px',
+                      backgroundColor: '#17a2b8',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '14px'
+                    }}
+                  >
+                    채팅방 생성
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* 기존 채팅방 목록 */}
+            {rooms.length > 0 ? (
+              rooms.map((room) => (
+                <div 
+                  key={room.id}
+                  onClick={async () => {
+                    console.log('🚪 채팅방 선택:', room.id);
+                    setCurrentRoomId(room.id);
+                    
+                    // 메시지 로딩
+                    await loadMessages(room.id);
+                    
+                    // WebSocket 연결 상태 확인
+                    if (user && !webSocketService.isConnected()) {
+                      try {
+                        console.log('🔌 채팅방 선택 시 WebSocket 연결 확인 및 재연결 시도');
+                        await webSocketService.connect(user);
+                        console.log('✅ WebSocket 재연결 성공');
+                      } catch (error) {
+                        console.error('❌ WebSocket 재연결 실패:', error);
+                        setError('실시간 메시징 연결에 실패했습니다. 새로고침을 시도해보세요.');
+                      }
+                    }
+                  }}
+                  style={{
+                    padding: '15px',
+                    backgroundColor: currentRoomId === room.id ? '#e3f2fd' : '#f8f9fa',
+                    borderRadius: '8px',
+                    marginBottom: '10px',
+                    cursor: 'pointer',
+                    border: currentRoomId === room.id ? '2px solid #2196f3' : '1px solid #dee2e6'
+                  }}
+                >
+                  <div style={{ fontWeight: 'bold', color: '#333' }}>
+                    {room.participants
+                      .filter(p => p.username !== user)
+                      .map(p => p.username)
+                      .join(', ') || '나만 있는 방'}
+                  </div>
+                  <div style={{ fontSize: '14px', color: '#666', marginTop: '5px' }}>
+                    채팅방 #{room.id}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div style={{
+                padding: '15px',
+                backgroundColor: '#f8f9fa',
+                borderRadius: '8px',
+                textAlign: 'center',
+                color: '#666'
+              }}>
+                채팅방이 없습니다
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 메시지 영역 */}
+        <div style={{ 
+          flex: 1, 
+          display: 'flex', 
+          flexDirection: 'column',
+          backgroundColor: 'white'
+        }}>
+          {/* 메시지 목록 */}
+          <div style={{
+            flex: 1,
+            padding: '20px',
+            overflowY: 'auto',
+            backgroundColor: '#fafafa'
+          }}>
+            {isLoading ? (
+              <div style={{ 
+                textAlign: 'center', 
+                padding: '30px', 
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '15px'
+              }}>
+                <div style={{ 
+                  width: '40px', 
+                  height: '40px', 
+                  border: '3px solid #f0f0f0',
+                  borderTop: '3px solid #3498db',
+                  borderRadius: '50%',
+                  animation: 'spin 1s linear infinite'
+                }}></div>
+                <div>
+                  <div style={{ color: '#666', fontWeight: 'bold' }}>메시지 로딩 중...</div>
+                  <div style={{ color: '#999', fontSize: '14px', marginTop: '5px' }}>채팅 내역을 불러오고 있습니다</div>
+                </div>
+              </div>
+            ) : messages.length > 0 ? (
+              messages.map((message) => (
+              <div 
+                key={message.id}
+                style={{
+                  marginBottom: '15px',
+                  display: 'flex',
+                  justifyContent: message.sender.username === user ? 'flex-end' : 'flex-start'
+                }}
+              >
+                <div style={{
+                  maxWidth: '70%',
+                  padding: '12px 16px',
+                  borderRadius: '18px',
+                  backgroundColor: message.sender.username === user ? '#007bff' : 'white',
+                  color: message.sender.username === user ? 'white' : '#333',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                }}>
+                  {message.sender.username !== user && (
+                    <div style={{ 
+                      fontSize: '12px', 
+                      opacity: 0.7, 
+                      marginBottom: '4px',
+                      fontWeight: 'bold'
+                    }}>
+                      {message.sender.username}
+                    </div>
+                  )}
+                  <div>{message.content}</div>
+                  <div style={{ 
+                    fontSize: '11px', 
+                    opacity: 0.6, 
+                    marginTop: '4px',
+                    textAlign: 'right'
+                  }}>
+                    {new Date(message.sentAt).toLocaleTimeString()}
+                  </div>
+                </div>
+              </div>
+            ))) : (
+              <div style={{ 
+                textAlign: 'center', 
+                padding: '40px 20px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center'
+              }}>
+                <div style={{ 
+                  width: '60px',
+                  height: '60px',
+                  borderRadius: '50%',
+                  backgroundColor: '#f5f5f5',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '24px',
+                  marginBottom: '15px'
+                }}>
+                  ✉️
+                </div>
+                <div style={{ color: '#666', fontWeight: 'bold', marginBottom: '8px' }}>
+                  메시지가 없습니다
+                </div>
+                <div style={{ color: '#999', fontSize: '14px' }}>
+                  첫 메시지를 보내보세요! ✏️
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 메시지 입력 */}
+          <div style={{
+            padding: '20px',
+            borderTop: '1px solid #dee2e6',
+            backgroundColor: 'white'
+          }}>
+            <form onSubmit={handleSendMessage} style={{ display: 'flex', gap: '10px' }}>
+              <input
+                type="text"
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                placeholder="메시지를 입력하세요..."
+                style={{
+                  flex: 1,
+                  padding: '12px 16px',
+                  border: '1px solid #dee2e6',
+                  borderRadius: '25px',
+                  fontSize: '16px',
+                  outline: 'none'
+                }}
+              />
+              <button
+                type="submit"
+                style={{
+                  padding: '12px 24px',
+                  backgroundColor: '#007bff',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '25px',
+                  fontSize: '16px',
+                  cursor: 'pointer',
+                  fontWeight: 'bold'
+                }}
+              >
+                전송
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
