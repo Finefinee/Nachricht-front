@@ -1,7 +1,8 @@
 # Nachricht Frontend
 
 Spring Boot 백엔드와 연동되는 React TypeScript 메시징 앱 프론트엔드입니다.
-프론트 몰라서 걍 copilot 시킴 ㅋㅋ;
+
+<img width="1512" height="801" alt="스크린샷 2025-08-06 오후 3 50 20" src="https://github.com/user-attachments/assets/ebe06560-5fe7-433d-9acd-464246a45f27" />
 
 ## 🚀 기능
 
@@ -11,6 +12,7 @@ Spring Boot 백엔드와 연동되는 React TypeScript 메시징 앱 프론트�
 - **반응형 디자인**: 모바일 및 데스크톱 환경 지원
 
 ## 🛠 기술 스택
+
 
 - **Frontend**: React 18, TypeScript
 - **빌드 도구**: Vite
