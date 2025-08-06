@@ -18,21 +18,49 @@ const api = axios.create({
 });
 
 // Request interceptor to add auth token
-api.interceptors.request.use((config) => {
+api.interceptors.request.use(async (config) => {
   console.log(`🚀 API 요청 시작: ${config.method?.toUpperCase()} ${config.url}`, new Date().toISOString());
   
-  const token = localStorage.getItem('accessToken');
+  let token = localStorage.getItem('accessToken');
   if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-    
     // JWT 토큰 만료 확인 (간단한 체크)
     try {
       const payload = JSON.parse(atob(token.split('.')[1]));
       const now = Math.floor(Date.now() / 1000);
+      
       if (payload.exp && payload.exp < now) {
         console.warn('⚠️ JWT 토큰이 만료되었습니다:', new Date(payload.exp * 1000));
-        // 토큰 만료 시 자동 갱신 시도 표시
-        console.log('🔄 토큰 갱신이 필요합니다 - 요청 계속 진행');
+        console.log('🔄 토큰 갱신 시도 시작');
+        
+        // 리프레시 토큰으로 자동 갱신 시도
+        const refreshToken = localStorage.getItem('refreshToken');
+        if (refreshToken) {
+          try {
+            // API 호출 시 요청 인터셉터가 다시 실행되어 무한 루프가 발생할 수 있으므로
+            // axios 직접 사용 (api 인스턴스 대신)
+            const response = await axios.post(
+              `${API_BASE_URL}/auth/refresh`, 
+              { refreshToken }
+            );
+            
+            const newAccessToken = response.data.accessToken;
+            const newRefreshToken = response.data.refreshToken;
+            
+            localStorage.setItem('accessToken', newAccessToken);
+            localStorage.setItem('refreshToken', newRefreshToken);
+            
+            console.log('✅ 토큰 자동 갱신 성공');
+            token = newAccessToken;  // 새 토큰으로 업데이트
+          } catch (refreshError) {
+            console.error('❌ 토큰 자동 갱신 실패:', refreshError);
+            // 갱신 실패 시 로그인 페이지로 리다이렉트
+            localStorage.removeItem('accessToken');
+            localStorage.removeItem('refreshToken');
+            sessionStorage.setItem('redirectAfterLogin', window.location.pathname);
+            window.location.href = '/login';
+            return Promise.reject(refreshError);
+          }
+        }
       } else {
         const remainingSecs = payload.exp - now;
         console.log(`✅ JWT 토큰 유효: ${remainingSecs}초 남음 (${new Date(payload.exp * 1000)}까지)`);
@@ -40,6 +68,9 @@ api.interceptors.request.use((config) => {
     } catch (parseError) {
       console.warn('⚠️ JWT 토큰 파싱 실패:', parseError);
     }
+    
+    // 최종적으로 토큰 설정 (갱신된 토큰이거나 원래 토큰)
+    config.headers.Authorization = `Bearer ${token}`;
   } else {
     console.warn('⚠️ JWT 토큰이 없습니다 - 인증이 필요한 요청은 실패할 수 있습니다');
   }

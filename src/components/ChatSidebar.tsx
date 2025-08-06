@@ -6,10 +6,20 @@ import type { User as UserType } from '../types';
 
 const ChatSidebar: React.FC = () => {
   const { state: authState, logout } = useAuth();
-  const { state: chatState, setActiveRoom, createRoom, loadRooms } = useChat();
+  const { state: chatState, setActiveRoom, createRoom, loadRooms, loadMessages } = useChat();
   const [showNewChatInput, setShowNewChatInput] = useState(false);
   const [newChatUsername, setNewChatUsername] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  // 컴포넌트 마운트시 모든 채팅방의 메시지를 미리 로드
+  useEffect(() => {
+    if (chatState.rooms.length > 0) {
+      console.log('📨 사이드바에서 모든 채팅방 메시지 미리 로드');
+      chatState.rooms.forEach(room => {
+        loadMessages(room.id);
+      });
+    }
+  }, [chatState.rooms, loadMessages]);
 
   // 채팅방 새로고침 핸들러
   const handleRefreshRooms = async () => {
@@ -144,17 +154,54 @@ const ChatSidebar: React.FC = () => {
             <p className="chat-empty-subtext">새 채팅을 시작해보세요!</p>
           </div>
         ) : (
-          chatState.rooms
+          // 채팅방 목록 정렬 (최신 메시지 기준)
+          [...chatState.rooms]
+            // 유효한 채팅방만 필터링
             .filter(room => room && typeof room.id === 'number')
+            // 정렬 함수
+            .sort((roomA, roomB) => {
+              const messagesA = chatState.messages[roomA.id] || [];
+              const messagesB = chatState.messages[roomB.id] || [];
+              
+              // 둘 다 메시지가 없으면 ID로 정렬 (오래된 채팅방이 위로)
+              if (messagesA.length === 0 && messagesB.length === 0) {
+                return roomA.id - roomB.id;
+              }
+              
+              // A에 메시지가 없으면 B가 위로
+              if (messagesA.length === 0) return 1;
+              
+              // B에 메시지가 없으면 A가 위로
+              if (messagesB.length === 0) return -1;
+              
+              // 둘 다 메시지가 있으면 마지막 메시지 시간으로 정렬
+              const lastMessageA = messagesA[messagesA.length - 1];
+              const lastMessageB = messagesB[messagesB.length - 1];
+              
+              // 시간 객체로 변환해서 비교
+              const timeA = new Date(lastMessageA.sentAt).getTime();
+              const timeB = new Date(lastMessageB.sentAt).getTime();
+              
+              // 최신 메시지가 위로 (내림차순)
+              return timeB - timeA;
+            })
             .map((room) => {
-              console.log('📍 채팅방 렌더링 중:', room.id, '참여자:', room.participants);
+              // 디버깅 로그
+              console.log('📍 채팅방 렌더링 중:', room.id, '참여자:', room.participants, 
+                        '마지막 메시지:', chatState.messages[room.id]?.length > 0 ? 
+                                      new Date(chatState.messages[room.id][chatState.messages[room.id].length - 1].sentAt).toLocaleString() : 'none');
               const otherParticipant = getOtherParticipant(room.participants);
               const isActive = chatState.activeRoom?.id === room.id;
               
               return (
                 <div
                   key={room.id}
-                  onClick={() => setActiveRoom(room)}
+                  onClick={() => {
+                    // 이미 선택된 채팅방은 다시 클릭해도 아무 동작 없게
+                    if (!isActive) {
+                      setActiveRoom(room);
+                    }
+                  }}
                   className={`chat-item ${isActive ? 'active' : ''}`}
                 >
                   <div className="chat-avatar">
@@ -165,11 +212,11 @@ const ChatSidebar: React.FC = () => {
                     <div className="chat-name">
                       {otherParticipant?.username || `채팅방 #${room.id}`}
                     </div>
-                    {chatState.messages[room.id]?.length > 0 && (
-                      <div className="chat-preview">
-                        {chatState.messages[room.id][chatState.messages[room.id].length - 1].content}
-                      </div>
-                    )}
+                    <div className="chat-preview">
+                      {chatState.messages[room.id]?.length > 0 
+                        ? chatState.messages[room.id][chatState.messages[room.id].length - 1].content
+                        : '새로운 대화를 시작하세요'}
+                    </div>
                   </div>
                 </div>
               );

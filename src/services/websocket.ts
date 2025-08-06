@@ -35,18 +35,26 @@ class WebSocketService {
           webSocketFactory: () => {
             console.log('🏭 SockJS 팩토리 호출');
             try {
-              return new SockJS(SOCKET_URL);
+              // SockJS 옵션 추가: 더 긴 타임아웃과 더 많은 재시도 횟수
+              return new SockJS(SOCKET_URL, null, {
+                transports: ['websocket', 'xhr-polling', 'xhr-streaming'],
+                timeout: 30000, // 30초 타임아웃
+              });
             } catch (error) {
               console.error('❌ SockJS 생성 오류:', error);
               throw error;
             }
           },
           debug: (str) => {
-            console.log('STOMP Debug:', str);
+            // 중요한 디버그 메시지만 출력
+            if (str.includes('error') || str.includes('connect') || str.includes('disconnect')) {
+              console.log('STOMP Debug:', str);
+            }
           },
-          reconnectDelay: 5000,
-          heartbeatIncoming: 4000,
-          heartbeatOutgoing: 4000,
+          // 연결 끊길 시 자동 재연결 설정
+          reconnectDelay: 3000,       // 3초 후 재연결 시도
+          heartbeatIncoming: 30000,   // 30초마다 heartbeat 체크 
+          heartbeatOutgoing: 30000,   // 30초마다 heartbeat 전송
           connectHeaders: {
             'username': username
           },

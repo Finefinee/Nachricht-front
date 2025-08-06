@@ -69,8 +69,17 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
         roomId, 
         content: message.content,
         sender: message.senderUsername,
+        when: message.when,
         currentMessagesCount: currentMessages.length 
       });
+      
+      // 메시지 시간 처리 확인
+      try {
+        const messageDate = new Date(message.when);
+        console.log(`⏰ 메시지 시간 파싱: ${messageDate.toLocaleString('ko-KR')} (현지 시간)`);
+      } catch (error) {
+        console.warn('⚠️ 메시지 시간 파싱 실패:', error);
+      }
       
       // 중복 메시지 방지
       const isDuplicate = currentMessages.some(
@@ -101,12 +110,21 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
           console.warn('⚠️ 로컬 스토리지 저장 실패:', error);
         }
         
+        // 새 메시지가 있는 채팅방이 목록 최상단으로 오도록 정렬
+        const updatedMessages = {
+          ...state.messages,
+          [roomId]: newMessages,
+        };
+        
+        // 기존 state의 rooms 배열을 그대로 사용 (순서 변경하지 않음)
+        // 채팅방 정렬은 sidebar 컴포넌트에서 직접 수행하도록 함
+        // 이렇게 하면 불필요한 리렌더링이 줄어들고, UI 구성요소에서 정렬 로직을 집중 관리할 수 있음
+        
+        console.log('� 메시지 추가됨 - 채팅방:', roomId, '시간:', new Date(message.when).toLocaleString());
+        
         return {
           ...state,
-          messages: {
-            ...state.messages,
-            [roomId]: newMessages,
-          },
+          messages: updatedMessages,
         };
       } else {
         console.log('⚠️ 중복 메시지 무시됨');
@@ -164,6 +182,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
+  // 채팅방 정렬은 이제 렌더링 시 ChatSidebar 컴포넌트에서 수행
+
   // 채팅방 로드 함수
   const loadRooms = useCallback(async (): Promise<MessengerRoom[]> => {
     if (!authState.user) {
@@ -194,7 +214,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       
       console.log(`✅ 채팅방 ${rooms.length}개 로드 성공:`, rooms);
+      
+      // 정렬은 하지 않고 원래 순서대로 저장
+      // 실제 정렬은 ChatSidebar 컴포넌트에서 수행
+      
       dispatch({ type: 'SET_ROOMS', payload: rooms });
+      
+      console.log('🏆 채팅방 로드 완료, 최신순으로 정렬될 것입니다.');
+      
       return rooms;
     } catch (error) {
       console.error('❌ 채팅방 목록 로드 실패:', error);
@@ -253,11 +280,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
+    // 현재 날짜와 시간을 로컬 타임존으로 생성
+    const now = new Date();
+    console.log(`⏰ 메시지 작성 시간: ${now.toLocaleString('ko-KR')} (현지 시간)`);
+    
     const message: SendMessageRequest = {
       senderUsername: authState.user.username,
       roomId,
       content: content.trim(),
-      when: new Date().toISOString(), // ISO 형식 시간 사용
+      when: now.toISOString(), // ISO 형식 시간 사용 (UTC 기반)
     };
 
     // 디버그 로그 추가
@@ -339,17 +370,93 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
   
-  // 첫 번째 채팅방 선택 함수 
-  const selectFirstRoom = useCallback((rooms: MessengerRoom[]) => {
-    if (rooms.length > 0 && !state.activeRoom) {
-      console.log('🔄 첫 번째 채팅방 자동 선택:', rooms[0].id);
-      dispatch({ type: 'SET_ACTIVE_ROOM', payload: rooms[0] });
-      loadMessages(rooms[0].id);
+  // 최신 메시지가 있는 채팅방 선택 함수 (개선된 버전)
+  const selectFirstRoom = useCallback(async (rooms: MessengerRoom[]) => {
+    // 이미 선택된 채팅방이 있거나 채팅방이 없으면 무시
+    if (!rooms.length || state.activeRoom) {
+      return;
+    }
+    
+    console.log(`🔍 최신 채팅방 선택 시도 중... 현재 ${rooms.length}개 채팅방 가용`);
+    
+    try {
+      // 1. 로컬 스토리지에서 이전에 저장된 활성 채팅방 ID가 있는지 확인
+      const savedRoomId = localStorage.getItem('activeRoomId');
+      if (savedRoomId) {
+        const roomId = parseInt(savedRoomId, 10);
+        const savedRoom = rooms.find(r => r.id === roomId);
+        if (savedRoom) {
+          console.log(`💾 로컬 스토리지에 저장된 채팅방 발견: #${roomId}, 선택합니다`);
+          dispatch({ type: 'SET_ACTIVE_ROOM', payload: savedRoom });
+          loadMessages(savedRoom.id);
+          return;
+        }
+      }
+      
+      // 2. 모든 채팅방의 메시지를 가져오기 위한 병렬 로드 (최적화)
+      // 메시지 로딩이 이전에 안 되어있을 수 있으므로 최대 3개 채팅방만 병렬로 로드
+      const loadMessagesPromises = rooms.slice(0, 3).map(room => {
+        // 이미 메시지가 로드되어 있으면 스킵
+        if (state.messages[room.id] && state.messages[room.id].length > 0) {
+          return Promise.resolve(state.messages[room.id]);
+        }
+        // 아니면 메시지 로드
+        return loadMessages(room.id).then(() => state.messages[room.id] || []);
+      });
+      
+      // 병렬로 메시지 로드 실행
+      await Promise.all(loadMessagesPromises);
+      console.log('� 주요 채팅방 메시지 로드 완료');
+      
+      // 3. 메시지가 있는 채팅방 찾기
+      const roomsWithMessages = rooms.filter(room => 
+        state.messages[room.id] && state.messages[room.id].length > 0
+      );
+      
+      let roomToSelect;
+      
+      if (roomsWithMessages.length > 0) {
+        // 메시지 시간순으로 정렬
+        roomsWithMessages.sort((a, b) => {
+          const messagesA = state.messages[a.id] || [];
+          const messagesB = state.messages[b.id] || [];
+          
+          if (messagesA.length === 0) return 1;
+          if (messagesB.length === 0) return -1;
+          
+          const timeA = new Date(messagesA[messagesA.length - 1].sentAt).getTime();
+          const timeB = new Date(messagesB[messagesB.length - 1].sentAt).getTime();
+          
+          return timeB - timeA; // 최신순 정렬
+        });
+        
+        // 가장 최신 메시지가 있는 채팅방 선택
+        roomToSelect = roomsWithMessages[0];
+        console.log(`🔄 최신 메시지 기준 채팅방 #${roomToSelect.id} 선택됨`);
+      } else {
+        // 메시지가 없으면 첫 번째 채팅방 선택
+        roomToSelect = rooms[0];
+        console.log(`🔄 메시지가 없어 첫 번째 채팅방 #${roomToSelect.id} 선택됨`);
+      }
+      
+      // 선택된 채팅방 활성화
+      dispatch({ type: 'SET_ACTIVE_ROOM', payload: roomToSelect });
+      loadMessages(roomToSelect.id);
+      
+      // 로컬 스토리지에 활성 채팅방 ID 저장
+      localStorage.setItem('activeRoomId', roomToSelect.id.toString());
       
       // 보류 중인 메시지 처리
       processPendingMessages();
+    } catch (error) {
+      console.error('❌ 최신 채팅방 선택 중 오류 발생:', error);
+      // 오류 발생 시 첫 번째 채팅방 선택
+      if (rooms.length > 0) {
+        dispatch({ type: 'SET_ACTIVE_ROOM', payload: rooms[0] });
+        loadMessages(rooms[0].id);
+      }
     }
-  }, [state.activeRoom, loadMessages, processPendingMessages]);
+  }, [state.activeRoom, state.messages, loadMessages, processPendingMessages]);
 
   // 채팅 초기화 시도 함수
   const attemptInitialization = useCallback(async () => {
@@ -373,8 +480,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       // 채팅방 로드
       const rooms = await loadRooms();
-      // 첫 번째 채팅방 선택
-      selectFirstRoom(rooms);
+      
+      // 채팅방 로드 후 잠시 대기
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // 모든 로드 작업 완료 후 첫 번째 채팅방 선택
+      await selectFirstRoom(rooms);
+      
       console.log('✅ 채팅 초기화 완료');
       setIsInitializing(false);
     } catch (error) {

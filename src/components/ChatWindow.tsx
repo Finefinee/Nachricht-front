@@ -48,12 +48,24 @@ const ChatWindow: React.FC = () => {
       if (timeString.includes(':') && !timeString.includes('T')) {
         return timeString; // 이미 시간 형식
       }
+      
+      // ISO 문자열을 Date 객체로 파싱
       const date = new Date(timeString);
+      
+      // 유효한 날짜인지 확인
+      if (isNaN(date.getTime())) {
+        console.warn('⚠️ 잘못된 날짜 형식:', timeString);
+        return timeString;
+      }
+      
+      // 로컬 시간 형식으로 변환
       return date.toLocaleTimeString('ko-KR', { 
         hour: '2-digit', 
-        minute: '2-digit' 
+        minute: '2-digit',
+        hour12: true
       });
-    } catch {
+    } catch (error) {
+      console.error('❌ 시간 형식 변환 오류:', error);
       return timeString;
     }
   };
