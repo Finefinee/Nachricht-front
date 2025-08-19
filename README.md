@@ -14,7 +14,7 @@ Spring Boot 백엔드와 연동되는 React TypeScript 메시징 앱 프론트�
 ## 🛠 기술 스택
 
 
-- **Frontend**: React 18, TypeScript
+- **Frontend**: React, TypeScript
 - **빌드 도구**: Vite
 - **스타일링**: TailwindCSS
 - **상태 관리**: React Context API
